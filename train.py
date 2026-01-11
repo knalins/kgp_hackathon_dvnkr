@@ -45,18 +45,18 @@ LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 0.1
 LOG_FREQ = 100
 
-input_file_path = os.path.join(os.path.dirname(__file__), "input.txt")
-
+book_file_path = os.path.join(os.path.dirname(__file__), "Books")
 
 # Fetch the tiny Shakespeare dataset
-def fetch_data():
+def fetch_data(file_name):
+    input_file_path = os.path.join(os.path.dirname(__file__), f"train_{file_name}.txt")
     if not os.path.exists(input_file_path):
-        data_url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+        novel_file_path = os.path.join(book_file_path, file_name)
         with open(input_file_path, "w") as f:
-            f.write(requests.get(data_url).text)
+            f.write(open(novel_file_path, "r").read())
 
 
-def get_batch(split):
+def get_batch(split, input_file_path):
     # treat the file as bytes
     data = np.memmap(input_file_path, dtype=np.uint8, mode="r")
     if split == "train":
@@ -88,39 +88,42 @@ def eval(model):
 
 
 if __name__ == "__main__":
-    fetch_data()
+    books_list = os.listdir(book_file_path)
+    for book in books_list[:1]:
+        print(f"Training on book: {book}")
+        fetch_data(book)
 
-    model = bdh.BDH(BDH_CONFIG).to(device)
-    model = torch.compile(model)
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
-    )
+        model = bdh.BDH(BDH_CONFIG).to(device)
+        model = torch.compile(model)
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+        )
 
-    x, y = get_batch("train")
-
-    loss_acc = 0
-    loss_steps = 0
-    for step in range(MAX_ITERS):
-        with ctx:
-            logits, loss = model(x, y)
         x, y = get_batch("train")
-        loss_acc += loss
-        loss_steps += 1
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad()
-        if step % LOG_FREQ == 0:
-            print(f"Step: {step}/{MAX_ITERS} loss {loss_acc.item() / loss_steps:.3}")
-            loss_acc = 0
-            loss_steps = 0
-    print("Training done, now generating a sample ")
-    model.eval()
-    prompt = torch.tensor(
-        bytearray("To be or ", "utf-8"), dtype=torch.long, device=device
-    ).unsqueeze(0)
-    ret = model.generate(prompt, max_new_tokens=100, top_k=3)
-    ret_decoded = bytes(ret.to(torch.uint8).to("cpu").squeeze(0)).decode(
-        errors="backslashreplace"
-    )
-    print(ret_decoded)
+
+        loss_acc = 0
+        loss_steps = 0
+        for step in range(MAX_ITERS):
+            with ctx:
+                logits, loss = model(x, y)
+            x, y = get_batch("train")
+            loss_acc += loss
+            loss_steps += 1
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            if step % LOG_FREQ == 0:
+                print(f"Step: {step}/{MAX_ITERS} loss {loss_acc.item() / loss_steps:.3}")
+                loss_acc = 0
+                loss_steps = 0
+        print("Training done, now generating a sample ")
+        model.eval()
+        prompt = torch.tensor(
+            bytearray("To be or ", "utf-8"), dtype=torch.long, device=device
+        ).unsqueeze(0)
+        ret = model.generate(prompt, max_new_tokens=100, top_k=3)
+        ret_decoded = bytes(ret.to(torch.uint8).to("cpu").squeeze(0)).decode(
+            errors="backslashreplace"
+        )
+        print(ret_decoded)
