@@ -5,10 +5,10 @@ from contextlib import nullcontext
 
 import bdh
 import numpy as np
-import requests
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import train_classifier
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # On a Mac you can also try
@@ -40,30 +40,26 @@ print(f"Using device: {device} with dtype {dtype}")
 BDH_CONFIG = bdh.BDHConfig()
 BLOCK_SIZE = 512
 BATCH_SIZE = 32
-MAX_ITERS = 3000
+MAX_ITERS = 500
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 0.1
 LOG_FREQ = 100
 
 book_file_path = os.path.join(os.path.dirname(__file__), "Books")
 
-# Fetch the tiny Shakespeare dataset
-def fetch_data(file_name):
-    input_file_path = os.path.join(os.path.dirname(__file__), f"train_{file_name}.txt")
-    if not os.path.exists(input_file_path):
-        novel_file_path = os.path.join(book_file_path, file_name)
-        with open(input_file_path, "w") as f:
-            f.write(open(novel_file_path, "r").read())
-
-
-def get_batch(split, input_file_path):
+def get_batch(input_file_path):
     # treat the file as bytes
     data = np.memmap(input_file_path, dtype=np.uint8, mode="r")
-    if split == "train":
-        data = data[: int(0.9 * len(data))]
-    else:
-        data = data[int(0.9 * len(data)) :]
-    ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE,))
+    
+    # ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE,))
+    max_start = len(data) - BLOCK_SIZE - 1
+    num_possible_chunks = max_start // 256
+    
+    # Select random starting points aligned to stride
+    chunk_indices = torch.randint(0, max(1, num_possible_chunks), (BATCH_SIZE,))
+    ix = chunk_indices * 256
+    ix = torch.clamp(ix, 0, max_start)
+    
     x = torch.stack(
         [torch.from_numpy((data[i : i + BLOCK_SIZE]).astype(np.int64)) for i in ix]
     )
@@ -82,31 +78,23 @@ def get_batch(split, input_file_path):
         x, y = x.to(device), y.to(device)
     return x, y
 
-
-def eval(model):
-    model.eval()
-
-
-if __name__ == "__main__":
+def train_novel():
     books_list = os.listdir(book_file_path)
-    for book in books_list[:1]:
+    for book in books_list:
         print(f"Training on book: {book}")
-        fetch_data(book)
-
+        novel_file_path = os.path.join(book_file_path, book)
+        
         model = bdh.BDH(BDH_CONFIG).to(device)
-        model = torch.compile(model)
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
         )
 
-        x, y = get_batch("train")
-
+        x, y = get_batch(novel_file_path)
         loss_acc = 0
         loss_steps = 0
         for step in range(MAX_ITERS):
             with ctx:
                 logits, loss = model(x, y)
-            x, y = get_batch("train")
             loss_acc += loss
             loss_steps += 1
             scaler.scale(loss).backward()
@@ -117,13 +105,13 @@ if __name__ == "__main__":
                 print(f"Step: {step}/{MAX_ITERS} loss {loss_acc.item() / loss_steps:.3}")
                 loss_acc = 0
                 loss_steps = 0
-        print("Training done, now generating a sample ")
+
+        torch.save(model.state_dict(), f'{book[:-4].lower()}.pt')
+        print("Training done... ")
         model.eval()
-        prompt = torch.tensor(
-            bytearray("To be or ", "utf-8"), dtype=torch.long, device=device
-        ).unsqueeze(0)
-        ret = model.generate(prompt, max_new_tokens=100, top_k=3)
-        ret_decoded = bytes(ret.to(torch.uint8).to("cpu").squeeze(0)).decode(
-            errors="backslashreplace"
-        )
-        print(ret_decoded)
+        
+if __name__ == "__main__":
+    train_novel()
+    train_classifier.train_classifier_kfold()     # training
+    # train_classifier.evaluate_classifier()     # evaluation
+    train_classifier.predict()      # prediction
