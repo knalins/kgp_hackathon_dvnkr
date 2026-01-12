@@ -36,22 +36,43 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    subgraph Input["📄 Input Data"]
-        CSV[train.csv]
+    subgraph Data["📄 Data Loading"]
+        CSV[train.csv / test.csv]
+        DS[BackstoryDataset]
+        TOK[text_to_tokens<br/>UTF-8 encoding]
+        CHUNK[chunk_tokens<br/>Sliding Window]
     end
 
-    subgraph Classifier["🧠 Classifier Training"]
-        TC[train_classifier.py]
-        KF[K-Fold Cross<br/>Validation]
+    subgraph Model["🧠 BackstoryClassifier"]
+        BDH[BDH Backbone<br/>get_embeddings]
+        POOL[Mean Pooling<br/>with mask]
+        HEAD[Classification Head<br/>LayerNorm → Linear → GELU → Linear]
     end
 
-    subgraph Prediction["📊 Output"]
-        PRED[Predictions<br/>per row]
+    subgraph Training["🔄 K-Fold Training"]
+        KF[5-Fold CV]
+        TRAIN[Train on K-1 folds]
+        VAL[Validate on 1 fold]
     end
 
-    CSV --> TC
-    TC --> KF
-    KF --> PRED
+    subgraph Output["📊 Output"]
+        ACC[Fold Accuracies]
+        PRED[Predictions<br/>consistent / contradict]
+        SUB[submission.csv]
+    end
+
+    CSV --> DS
+    DS --> TOK
+    TOK --> CHUNK
+    CHUNK --> BDH
+    BDH --> POOL
+    POOL --> HEAD
+    HEAD --> KF
+    KF --> TRAIN
+    TRAIN --> VAL
+    VAL --> ACC
+    HEAD --> PRED
+    PRED --> SUB
 ```
 
 ---
