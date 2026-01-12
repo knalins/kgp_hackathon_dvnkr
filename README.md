@@ -135,21 +135,14 @@ flowchart LR
 Main training loop - trains one BDH model per book.
 
 ```mermaid
-flowchart TD
-    START([For each book]) --> INIT[Initialize BDH Model]
-    INIT --> LOAD[get_batch from book]
-    LOAD --> LOOP[Training Loop<br/>500 iterations]
-    LOOP --> FWD[Forward Pass<br/>with autocast]
-    FWD --> LOSS[Compute Loss]
-    LOSS --> BWD[Backward Pass<br/>with GradScaler]
-    BWD --> STEP[Optimizer Step]
-    STEP --> LOG{Every 100 steps}
-    LOG -->|Yes| PRINT[Print Loss]
-    LOG -->|No| CHECK{Done?}
-    PRINT --> CHECK
-    CHECK -->|No| FWD
-    CHECK -->|Yes| SAVE[Save book.pt]
-    SAVE --> NEXT([Next Book])
+flowchart LR
+    BOOK([Each Book]) --> INIT[Init BDH Model]
+    INIT --> BATCH[get_batch]
+    BATCH --> LOOP[Train 500 iters]
+    LOOP --> FWD[Forward + Loss]
+    FWD --> BWD[Backward + Step]
+    BWD --> LOG[Log every 100]
+    LOG --> SAVE[Save .pt]
 ```
 
 **Per-book workflow:**
