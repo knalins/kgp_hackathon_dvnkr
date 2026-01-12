@@ -79,7 +79,15 @@ if __name__ == "__main__":
 
 ### `get_batch(input_file_path)`
 
-Loads and prepares training batches from a raw text file.
+Loads and prepares training batches from a raw text file using random chunk selection.
+
+```mermaid
+flowchart LR
+    FILE[📄 Book File] --> MMAP[np.memmap<br/>byte array]
+    MMAP --> CHUNKS[Random Chunk<br/>Selection]
+    CHUNKS --> X[x tensor<br/>BATCH_SIZE × BLOCK_SIZE]
+    CHUNKS --> Y[y tensor<br/>shifted by 1]
+```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -88,10 +96,11 @@ Loads and prepares training batches from a raw text file.
 **Returns:** `(x, y)` tensors of shape `(BATCH_SIZE, BLOCK_SIZE)` for input and target sequences.
 
 **Process:**
-1. Memory-maps the file as bytes using `np.memmap`
-2. Selects random starting positions aligned to 256-byte stride
-3. Creates input-target pairs shifted by 1 position
-4. Pins memory for async GPU transfer (if CUDA available)
+1. Memory-maps file as bytes using `np.memmap`
+2. Calculates max starting positions aligned to 256-byte stride
+3. Randomly selects `BATCH_SIZE` chunk starting indices
+4. Creates input (`x`) and target (`y`, shifted +1) tensor pairs
+5. Pins memory for async GPU transfer (if CUDA available)
 
 ---
 
