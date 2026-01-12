@@ -8,7 +8,7 @@ A training wrapper for the **BDH (Backstory Distinction Heuristic)** language mo
 
 ```mermaid
 flowchart TD
-    subgraph Input["� Input"]
+    subgraph Input["📥 Input"]
         BYTES[Raw Bytes<br/>vocab_size=256]
     end
 
@@ -29,7 +29,7 @@ flowchart TD
         HEAD[LM Head<br/>256 → 256 vocab]
     end
 
-    subgraph Output["� Output"]
+    subgraph Output["📤 Output"]
         LOGITS[Logits]
         LOSS[Cross-Entropy Loss]
     end
@@ -53,7 +53,6 @@ flowchart TD
 | `n_head` | 4 | Attention heads |
 | `dropout` | 0.1 | Dropout rate |
 | `vocab_size` | 256 | Byte-level vocabulary |
-| `mlp_internal_dim_multiplier` | 128 | MLP expansion factor |
 
 ---
 
@@ -67,24 +66,28 @@ flowchart LR
         B3[Book3.txt]
     end
 
-    subgraph Training["� Model Training"]
-        BDH[bdh.py<br/>BDH Model]
-        OPT[AdamW<br/>Optimizer]
+    subgraph Training["🔧 Per-Book Training"]
+        GB[get_batch<br/>Random chunks]
+        BDH[BDH Model]
+        OPT[AdamW Optimizer]
+        AMP[Mixed Precision<br/>GradScaler]
     end
 
-    subgraph Output["� Output Models"]
+    subgraph Output["💾 Output"]
         M1[book1.pt]
         M2[book2.pt]
         M3[book3.pt]
     end
 
-    B1 --> BDH
-    B2 --> BDH
-    B3 --> BDH
+    B1 --> GB
+    B2 --> GB
+    B3 --> GB
+    GB --> BDH
     BDH --> OPT
-    OPT --> M1
-    OPT --> M2
-    OPT --> M3
+    OPT --> AMP
+    AMP --> M1
+    AMP --> M2
+    AMP --> M3
 ```
 
 ---
@@ -100,124 +103,72 @@ scaler = torch.amp.GradScaler(enabled=(dtype == "float16"))
 ```
 
 - **Auto device selection**: GPU if available, otherwise CPU
-- **Mixed precision**: Uses BF16/FP16 for faster training
-- **GradScaler**: Prevents underflow in FP16 training
+- **Mixed precision**: BF16/FP16 for faster training
+- **GradScaler**: Prevents gradient underflow in FP16
 
 ---
 
 ### `get_batch(input_file_path)`
 
+Loads training batches using random chunk selection.
+
 ```mermaid
 flowchart LR
     FILE[📄 Book File] --> MMAP[np.memmap<br/>byte array]
-    MMAP --> CHUNKS[Random Chunk<br/>Selection]
-    CHUNKS --> X[x tensor<br/>BATCH_SIZE × BLOCK_SIZE]
-    CHUNKS --> Y[y tensor<br/>shifted by 1]
+    MMAP --> STRIDE[Align to 256-byte<br/>stride]
+    STRIDE --> RAND[Random Selection<br/>BATCH_SIZE chunks]
+    RAND --> X[x tensor]
+    RAND --> Y[y tensor<br/>shifted +1]
 ```
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `input_file_path` | str | Path to the novel/book file |
-
-**Returns:** `(x, y)` tensors of shape `(BATCH_SIZE, BLOCK_SIZE)`.
-
 **Process:**
-1. Memory-maps file as bytes using `np.memmap`
-2. Calculates max starting positions aligned to 256-byte stride
-3. Randomly selects `BATCH_SIZE` chunk starting indices
-4. Creates input (`x`) and target (`y`, shifted +1) tensor pairs
-5. Pins memory for async GPU transfer (if CUDA available)
+1. Memory-map file as bytes
+2. Calculate valid starting positions (256-byte aligned)
+3. Randomly select `BATCH_SIZE` (32) chunks
+4. Create input/target pairs shifted by 1 position
+5. Transfer to GPU with pinned memory
 
 ---
 
 ### `train_novel()`
 
-Main training loop for each book in `Books/` directory.
-
-**Workflow:**
-1. Iterates over all files in `Books/` directory
-2. For each book:
-   - Initializes fresh BDH model
-   - Creates AdamW optimizer (`lr=1e-3`, `weight_decay=0.1`)
-   - Trains for 500 iterations
-   - Logs loss every 100 steps
-3. Saves model checkpoint as `{book_name}.pt`
-
----
-
-## Classification Pipeline
+Main training loop - trains one BDH model per book.
 
 ```mermaid
 flowchart TD
-    subgraph Data["📄 Data Loading"]
-        CSV[train.csv / test.csv]
-        DS[BackstoryDataset]
-        TOK[text_to_tokens<br/>UTF-8 encoding]
-        CHUNK[chunk_tokens<br/>Sliding Window]
-    end
-
-    subgraph Model["🧠 BackstoryClassifier"]
-        BDH[BDH Backbone<br/>get_embeddings]
-        POOL[Mean Pooling<br/>with mask]
-        HEAD[Classification Head<br/>LayerNorm → Linear → GELU → Linear]
-    end
-
-    subgraph Training["🔄 Training"]
-        WCE[Weighted CrossEntropy<br/>handles class imbalance]
-        TRAIN[Train on all samples]
-        SCHED[CosineAnnealing LR]
-    end
-
-    subgraph Output["📊 Output"]
-        PRED[Predictions<br/>consistent / contradict]
-        SUB[submission.csv]
-    end
-
-    CSV --> DS
-    DS --> TOK
-    TOK --> CHUNK
-    CHUNK --> BDH
-    BDH --> POOL
-    POOL --> HEAD
-    HEAD --> WCE
-    WCE --> TRAIN
-    TRAIN --> SCHED
-    SCHED --> PRED
-    PRED --> SUB
+    START([For each book]) --> INIT[Initialize BDH Model]
+    INIT --> LOAD[get_batch from book]
+    LOAD --> LOOP[Training Loop<br/>500 iterations]
+    LOOP --> FWD[Forward Pass<br/>with autocast]
+    FWD --> LOSS[Compute Loss]
+    LOSS --> BWD[Backward Pass<br/>with GradScaler]
+    BWD --> STEP[Optimizer Step]
+    STEP --> LOG{Every 100 steps}
+    LOG -->|Yes| PRINT[Print Loss]
+    LOG -->|No| CHECK{Done?}
+    PRINT --> CHECK
+    CHECK -->|No| FWD
+    CHECK -->|Yes| SAVE[Save book.pt]
+    SAVE --> NEXT([Next Book])
 ```
+
+**Per-book workflow:**
+1. Initialize fresh BDH model
+2. Create AdamW optimizer (lr=1e-3, weight_decay=0.1)
+3. Get batch of random chunks from book
+4. Train for 500 iterations with mixed precision
+5. Log loss every 100 steps
+6. Save model as `{book_name}.pt`
 
 ---
 
-## Main Execution Flow
-
-```mermaid
-flowchart TD
-    START([Start]) --> TN[train_novel]
-    TN --> TC[train_classifier]
-    TC --> PRED[predict]
-    PRED --> END([End])
-```
+## Main Execution
 
 ```python
 if __name__ == "__main__":
-    train_novel()                        # Train language models
-    train_classifier.train_classifier()  # Classifier training
-    train_classifier.predict()           # Prediction
-```
-
----
-
-## File Structure
-
-```
-bdh/
-├── train(1).py         # Main training wrapper
-├── bdh.py              # BDH model architecture
-├── train_classifier.py # Classifier module
-├── Books/              # Novel files
-│   ├── Book1.txt
-│   └── Book2.txt
-└── *.pt                # Trained models
+    train_novel()
+    train_classifier.train_classifier_kfold()
+    train_classifier.predict()
 ```
 
 ---
