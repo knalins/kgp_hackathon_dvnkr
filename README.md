@@ -1,4 +1,61 @@
-# train2.py Documentation
+# train(1).py - Pathway BDH Model Wrapper
+
+A training wrapper for the **BDH (Backstory Distinction Heuristic)** language model from Pathway Technology.
+
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart TD
+    subgraph Input["� Input"]
+        BYTES[Raw Bytes<br/>vocab_size=256]
+    end
+
+    subgraph BDH["🧠 BDH Model"]
+        EMB[Embedding Layer<br/>256 → 256 dims]
+        LN[LayerNorm]
+        
+        subgraph Layers["6 Transformer Layers"]
+            ENC[Encoder Projection<br/>D → N per head]
+            RELU1[ReLU Activation]
+            ATTN[RoPE Attention<br/>4 heads]
+            ENCV[Encoder V Projection]
+            RELU2[ReLU Activation]
+            MUL[Element-wise Multiply]
+            DEC[Decoder Projection<br/>N*heads → D]
+        end
+        
+        HEAD[LM Head<br/>256 → 256 vocab]
+    end
+
+    subgraph Output["� Output"]
+        LOGITS[Logits]
+        LOSS[Cross-Entropy Loss]
+    end
+
+    BYTES --> EMB
+    EMB --> LN
+    LN --> Layers
+    Layers --> HEAD
+    HEAD --> LOGITS
+    HEAD --> LOSS
+```
+
+---
+
+## Model Configuration
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `n_layer` | 6 | Number of transformer layers |
+| `n_embd` | 256 | Embedding dimension |
+| `n_head` | 4 | Attention heads |
+| `dropout` | 0.1 | Dropout rate |
+| `vocab_size` | 256 | Byte-level vocabulary |
+| `mlp_internal_dim_multiplier` | 128 | MLP expansion factor |
+
+---
 
 ## Training Pipeline
 
@@ -10,12 +67,12 @@ flowchart LR
         B3[Book3.txt]
     end
 
-    subgraph Training["🔧 Model Training"]
+    subgraph Training["� Model Training"]
         BDH[bdh.py<br/>BDH Model]
         OPT[AdamW<br/>Optimizer]
     end
 
-    subgraph Output["💾 Output Models"]
+    subgraph Output["� Output Models"]
         M1[book1.pt]
         M2[book2.pt]
         M3[book3.pt]
@@ -29,6 +86,62 @@ flowchart LR
     OPT --> M2
     OPT --> M3
 ```
+
+---
+
+## Code Explanation
+
+### Device & Precision Setup
+
+```python
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dtype = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
+scaler = torch.amp.GradScaler(enabled=(dtype == "float16"))
+```
+
+- **Auto device selection**: GPU if available, otherwise CPU
+- **Mixed precision**: Uses BF16/FP16 for faster training
+- **GradScaler**: Prevents underflow in FP16 training
+
+---
+
+### `get_batch(input_file_path)`
+
+```mermaid
+flowchart LR
+    FILE[📄 Book File] --> MMAP[np.memmap<br/>byte array]
+    MMAP --> CHUNKS[Random Chunk<br/>Selection]
+    CHUNKS --> X[x tensor<br/>BATCH_SIZE × BLOCK_SIZE]
+    CHUNKS --> Y[y tensor<br/>shifted by 1]
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `input_file_path` | str | Path to the novel/book file |
+
+**Returns:** `(x, y)` tensors of shape `(BATCH_SIZE, BLOCK_SIZE)`.
+
+**Process:**
+1. Memory-maps file as bytes using `np.memmap`
+2. Calculates max starting positions aligned to 256-byte stride
+3. Randomly selects `BATCH_SIZE` chunk starting indices
+4. Creates input (`x`) and target (`y`, shifted +1) tensor pairs
+5. Pins memory for async GPU transfer (if CUDA available)
+
+---
+
+### `train_novel()`
+
+Main training loop for each book in `Books/` directory.
+
+**Workflow:**
+1. Iterates over all files in `Books/` directory
+2. For each book:
+   - Initializes fresh BDH model
+   - Creates AdamW optimizer (`lr=1e-3`, `weight_decay=0.1`)
+   - Trains for 500 iterations
+   - Logs loss every 100 steps
+3. Saves model checkpoint as `{book_name}.pt`
 
 ---
 
@@ -49,14 +162,13 @@ flowchart TD
         HEAD[Classification Head<br/>LayerNorm → Linear → GELU → Linear]
     end
 
-    subgraph Training["🔄 K-Fold Training"]
-        KF[5-Fold CV]
-        TRAIN[Train on K-1 folds]
-        VAL[Validate on 1 fold]
+    subgraph Training["🔄 Training"]
+        WCE[Weighted CrossEntropy<br/>handles class imbalance]
+        TRAIN[Train on all samples]
+        SCHED[CosineAnnealing LR]
     end
 
     subgraph Output["📊 Output"]
-        ACC[Fold Accuracies]
         PRED[Predictions<br/>consistent / contradict]
         SUB[submission.csv]
     end
@@ -67,11 +179,10 @@ flowchart TD
     CHUNK --> BDH
     BDH --> POOL
     POOL --> HEAD
-    HEAD --> KF
-    KF --> TRAIN
-    TRAIN --> VAL
-    VAL --> ACC
-    HEAD --> PRED
+    HEAD --> WCE
+    WCE --> TRAIN
+    TRAIN --> SCHED
+    SCHED --> PRED
     PRED --> SUB
 ```
 
@@ -82,61 +193,17 @@ flowchart TD
 ```mermaid
 flowchart TD
     START([Start]) --> TN[train_novel]
-    TN --> TCK[train_classifier_kfold]
-    TCK --> PRED[predict]
+    TN --> TC[train_classifier]
+    TC --> PRED[predict]
     PRED --> END([End])
 ```
 
 ```python
 if __name__ == "__main__":
-    train_novel()                              # Train language models
-    train_classifier.train_classifier_kfold()  # K-fold training
-    train_classifier.predict()                 # Prediction
+    train_novel()                        # Train language models
+    train_classifier.train_classifier()  # Classifier training
+    train_classifier.predict()           # Prediction
 ```
-
----
-
-## Functions
-
-### `get_batch(input_file_path)`
-
-Loads and prepares training batches from a raw text file using random chunk selection.
-
-```mermaid
-flowchart LR
-    FILE[📄 Book File] --> MMAP[np.memmap<br/>byte array]
-    MMAP --> CHUNKS[Random Chunk<br/>Selection]
-    CHUNKS --> X[x tensor<br/>BATCH_SIZE × BLOCK_SIZE]
-    CHUNKS --> Y[y tensor<br/>shifted by 1]
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `input_file_path` | str | Path to the novel/book file |
-
-**Returns:** `(x, y)` tensors of shape `(BATCH_SIZE, BLOCK_SIZE)` for input and target sequences.
-
-**Process:**
-1. Memory-maps file as bytes using `np.memmap`
-2. Calculates max starting positions aligned to 256-byte stride
-3. Randomly selects `BATCH_SIZE` chunk starting indices
-4. Creates input (`x`) and target (`y`, shifted +1) tensor pairs
-5. Pins memory for async GPU transfer (if CUDA available)
-
----
-
-### `train_novel()`
-
-Main training loop that trains a BDH model on each book in the `Books/` directory.
-
-**Workflow:**
-1. Iterates over all files in `Books/` directory
-2. For each book:
-   - Initializes fresh BDH model
-   - Creates AdamW optimizer
-   - Trains for `MAX_ITERS` (500) iterations
-   - Logs loss every `LOG_FREQ` (100) steps
-3. Saves model checkpoint as `{book_name}.pt`
 
 ---
 
@@ -144,7 +211,7 @@ Main training loop that trains a BDH model on each book in the `Books/` director
 
 ```
 bdh/
-├── train2.py           # Main training script
+├── train(1).py         # Main training wrapper
 ├── bdh.py              # BDH model architecture
 ├── train_classifier.py # Classifier module
 ├── Books/              # Novel files
@@ -152,3 +219,12 @@ bdh/
 │   └── Book2.txt
 └── *.pt                # Trained models
 ```
+
+---
+
+## Training Hyperparameters
+
+| Parameter | Value |
+|-----------|-------|
+| `BLOCK_SIZE` | 512 |
+| `BATCH_SIZE` | 32 |
